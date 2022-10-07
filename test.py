@@ -1,6 +1,7 @@
 import argparse
 from functools import reduce
 import logging
+import profile
 import re
 from typing import Any, Dict, List, Optional, Union
 from xmlrpc.client import DateTime
@@ -30,6 +31,9 @@ def run(argv=None, save_main_session=True):
         SetupOptions).save_main_session = save_main_session
 
     with beam.Pipeline(options=pipeline_options) as p:
+        import cProfile
+        import pstats
+        from io import StringIO
         from whylogs.core import DatasetProfile, DatasetProfileView
         from datetime import datetime
 
@@ -37,19 +41,24 @@ def run(argv=None, save_main_session=True):
             def create_accumulator(self) -> DatasetProfileView:
                 return DatasetProfile(dataset_timestamp=0).view()
 
-            def add_input(self, accumulator: DatasetProfileView, input: Dict[str, Any]):
+            def add_input(self, accumulator: DatasetProfileView, input: List[Dict[str, Any]]) -> DatasetProfileView:
+                print(f'Tracking {len(input)} of type {type(input)}')
                 profile = DatasetProfile()
-                profile.track(input)
+                for row in input:
+                    profile.track(row)
                 return accumulator.merge(profile.view())
+                # return 0
 
             def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
                 view: DatasetProfileView = DatasetProfile().view()
                 for current_view in accumulators:
                     view = view.merge(current_view)
                 return view
+                # return 1
 
             def extract_output(self, accumulator: DatasetProfileView) -> DatasetProfileView:
                 return accumulator.serialize()
+                # return 1
 
         def to_day_start(milli_time: int) -> datetime:
             date = datetime.fromtimestamp(milli_time/1000.0)
@@ -68,28 +77,32 @@ def run(argv=None, save_main_session=True):
             # tableId='short'
             tableId='full_201510'
         )
-        query = 'SELECT * FROM `whylogs-359820.hacker_news.full_201510` LIMIT 10'
+
+        # Method 1
         hacker_news_data = (
             p
             | 'ReadTable' >> beam.io.ReadFromBigQuery(table=table_spec, use_standard_sql=True)
-            # | 'With timestamps' >> beam.Map(lambda row: TimestampedValue(row, row['time']))
             | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
+            | 'Group into batches' >> beam.GroupIntoBatches(10_000, max_buffering_duration_secs=60)
             | 'Profile' >> beam.CombinePerKey(WhylogsCombine())
-            # | 'GroupByDay' >> beam.GroupBy(lambda row: to_day_start_millis(row['time']))
-            # | 'Profile' >> beam.CombineValues(WhylogsCombine())
         )
+
+
+        # Method 2 - just get counts
+        # hacker_news_data = (
+        #     p
+        #     | 'Read data' >> beam.io.ReadFromBigQuery(table=table_spec, use_standard_sql=True)
+        #     | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
+        #     | 'Get count' >> beam.combiners.Count.PerKey()
+        # )
+
+
+
+
         # output = hacker_news_data | 'Format' >> beam.Map(lambda x: f'{x}')
         hacker_news_data | 'Write' >> WriteToText(known_args.output)
 
 
-def stuff():
-    schema = DatasetSchema(types={'by': str})
-    profile = DatasetProfile(schema=schema)
-    data = {'by': 'HSO'}
-    profile.track(row=data)
-
-
 if __name__ == '__main__':
     logging.getLogger().setLevel(logging.INFO)
-    # stuff()
     run()
