@@ -32,6 +32,11 @@ def run(argv=None, save_main_session=True):
         dest='method',
         required=True,
         help='Which pipeline to execute')
+    parser.add_argument(
+        '--runtime-type-check',
+        dest='method',
+        default=True,
+        required=False)
     known_args, pipeline_args = parser.parse_known_args(argv)
 
     pipeline_options = PipelineOptions(pipeline_args)
@@ -46,35 +51,59 @@ def run(argv=None, save_main_session=True):
         from datetime import datetime
 
         # Apparently adds considerable overhead
-        # logger = logging.getLogger()
+        logger = logging.getLogger()
 
         class WhylogsCombineBulk(beam.CombineFn):
             """
             This combiner depends on GroupIntoBatches running and grouping all of the
-            rows into batch sizes so that we end up getting passed lists here. 
+            rows into batch sizes so that we end up getting passed lists here.
             """
 
             def create_accumulator(self) -> DatasetProfileView:
-                return DatasetProfile(dataset_timestamp=0).view()
+                return DatasetProfile().view()
 
             def add_input(self, accumulator: DatasetProfileView, input: List[Dict[str, Any]]) -> DatasetProfileView:
                 # logger.info(
                 #     f'Tracking {len(input)} of type {type(input)}. Sample: {input[0]}')
+                if len(input) == 0:
+                    logger.info('Got empty add_input')
+                    return accumulator
+
                 profile = DatasetProfile()
                 for row in input:
                     profile.track(row)
                 return accumulator.merge(profile.view())
 
             def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
+                if len(accumulators) == 1:
+                    logger.info('Returning accumulator, only one to merge')
+                    return accumulators[0]
+
                 # logger.info(f'Merging {len(accumulators)} views together')
                 view: DatasetProfileView = DatasetProfile().view()
                 for current_view in accumulators:
                     view = view.merge(current_view)
                 return view
 
-            def extract_output(self, accumulator: DatasetProfileView) -> DatasetProfileView:
-                # logger.info(f'Extracting profile {accumulator.to_pandas()}')
+            def extract_output(self, accumulator: DatasetProfileView) -> bytes:
                 return accumulator.serialize()
+
+        class CombineBulkControl(beam.CombineFn):
+            """
+            This mimics the WhylogsCombineBulk combiner but doesn't use whylogs.
+            """
+
+            def create_accumulator(self) -> int:
+                return 0
+
+            def add_input(self, accumulator: int, input: List[Dict[str, Any]]) -> int:
+                return accumulator + len(input)
+
+            def merge_accumulators(self, accumulators: List[int]) -> int:
+                return sum(accumulators)
+
+            def extract_output(self, accumulator: int) -> int:
+                return accumulator
 
         class WhylogsCombineSingle(beam.CombineFn):
             def create_accumulator(self) -> DatasetProfileView:
@@ -117,7 +146,7 @@ def run(argv=None, save_main_session=True):
         class CombineProfiledRows(beam.CombineFn):
             """
             This combiner depends on GroupIntoBatches running and grouping all of the
-            rows into batch sizes so that we end up getting passed lists here. 
+            rows into batch sizes so that we end up getting passed lists here.
             """
 
             def create_accumulator(self) -> DatasetProfileView:
@@ -165,9 +194,29 @@ def run(argv=None, save_main_session=True):
             hacker_news_data = (
                 p
                 | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                .with_output_types(Dict[str, Any])
                 | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
+                .with_output_types(Tuple[int,  Dict[str, Any]])
                 | 'Group into batches' >> beam.GroupIntoBatches(10_000, max_buffering_duration_secs=30)
-                | 'Profile' >> beam.CombinePerKey(WhylogsCombineBulk())
+                .with_output_types(Tuple[int,  List[Dict[str, Any]]])
+                | 'Profile' >> beam.CombinePerKey(WhylogsCombineBulk()) #.with_hot_key_fanout(10)
+                .with_output_types(Tuple[int, bytes])
+            )
+
+        if known_args.method == '1-control':
+            # Method 1-control
+            # Same as 1 but it doesn't use whylogs. Takes about 20 minutes. We should be close to this.
+            # https://console.cloud.google.com/dataflow/jobs/us-west1/2022-10-08_10_31_21-14427245417999075919;graphView=0?project=whylogs-359820
+            hacker_news_data = (
+                p
+                | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                .with_output_types(Dict[str, Any])
+                | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
+                .with_output_types(Tuple[int,  Dict[str, Any]])
+                | 'Group into batches' >> beam.GroupIntoBatches(10_000, max_buffering_duration_secs=30)
+                .with_output_types(Tuple[int,  List[Dict[str, Any]]])
+                | 'Profile' >> beam.CombinePerKey(CombineBulkControl())
+                .with_output_types(Tuple[int, int])
             )
 
         elif known_args.method == '2':
@@ -182,8 +231,11 @@ def run(argv=None, save_main_session=True):
             hacker_news_data = (
                 p
                 | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                .with_output_types(Dict[str, Any])
                 | 'Add keys and profile' >> beam.Map(add_keys_and_profile)
+                .with_output_types(Tuple[int, DatasetProfileView])
                 | 'Group and merge' >> beam.CombinePerKey(CombineProfiledRows())
+                .with_output_types(Tuple[int, bytes])
             )
 
         elif known_args.method == '3':
@@ -193,17 +245,24 @@ def run(argv=None, save_main_session=True):
             hacker_news_data = (
                 p
                 | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                .with_output_types(Dict[str, Any])
                 | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
+                .with_output_types(Tuple[int,  Dict[str, Any]])
                 | 'Profile' >> beam.CombinePerKey(WhylogsCombineSingle())
+                .with_output_types(Tuple[int, bytes])
             )
 
         elif known_args.method == 'noop':
             hacker_news_data = (
                 p
                 | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                .with_output_types(Dict[str, Any])
                 | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
+                .with_output_types(Tuple[int,  Dict[str, Any]])
                 | 'Group into batches' >> beam.GroupIntoBatches(10_000, max_buffering_duration_secs=30)
+                .with_output_types(Tuple[int,  List[Dict[str, Any]]])
                 | 'Profile' >> beam.CombinePerKey(NoOpCombiner())
+                .with_output_types(Tuple[int, int])
             )
 
         elif known_args.method == 'counts':
