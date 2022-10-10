@@ -66,8 +66,8 @@ def run(argv=None, save_main_session=True):
                 return DatasetProfile().view()
 
             def add_input(self, accumulator: DatasetProfileView, input: List[Dict[str, Any]]) -> DatasetProfileView:
-                start = timer()
-                logger.info(f'Tracking {len(input)} of type {type(input)}.')
+                # start = timer()
+                # logger.info(f'Tracking {len(input)} of type {type(input)}.')
                 if len(input) == 0:
                     logger.warn('Got empty add_input')
                     return accumulator
@@ -75,33 +75,33 @@ def run(argv=None, save_main_session=True):
                 profile = DatasetProfile()
                 profile.track(pd.DataFrame.from_dict(input))
                 ret = accumulator.merge(profile.view())
-                end = timer()
-                total = end - start
-                logger.info(
-                    f'add_input took {total} seconds with WHYLOGS_NO_ANALYTICS {os.environ["WHYLOGS_NO_ANALYTICS"]}')
+                # end = timer()
+                # total = end - start
+                # logger.info(
+                # f'add_input took {total} seconds with WHYLOGS_NO_ANALYTICS {os.environ["WHYLOGS_NO_ANALYTICS"]}')
                 return ret
 
             def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
-                start = timer()
+                # start = timer()
                 if len(accumulators) == 1:
-                    logger.info('Returning accumulator, only one to merge')
+                    # logger.info('Returning accumulator, only one to merge')
                     return accumulators[0]
 
-                logger.info(f'Merging {len(accumulators)} views together')
+                # logger.info(f'Merging {len(accumulators)} views together')
                 view: DatasetProfileView = DatasetProfile().view()
                 for current_view in accumulators:
                     view = view.merge(current_view)
-                end = timer()
-                total = end - start
-                logger.info(f'merge_accumulators took {total} seconds')
+                # end = timer()
+                # total = end - start
+                # logger.info(f'merge_accumulators took {total} seconds')
                 return view
 
             def extract_output(self, accumulator: DatasetProfileView) -> bytes:
-                start = timer()
+                # start = timer()
                 ser = accumulator.serialize()
-                end = timer()
-                total = end - start
-                logger.info(f'extract_output took {total} seconds')
+                # end = timer()
+                # total = end - start
+                # logger.info(f'extract_output took {total} seconds')
                 return ser
 
         class CombineBulkControl(beam.CombineFn):
@@ -201,12 +201,9 @@ def run(argv=None, save_main_session=True):
             datasetId='hacker_news',
             # tableId='short'
             # tableId='full_201510'
-            # tableId='comments'
-            tableId='comments_half'
+            tableId='comments'
+            # tableId='comments_half'
         )
-        # query = "SELECT * FROM `whylogs-359820.hacker_news.comments_half` order by time"
-        # query = "SELECT * FROM `whylogs-359820.hacker_news.comments` order by time"
-        # query = "SELECT * FROM `whylogs-359820.hacker_news.short` order by time"
 
         if known_args.method == '1':
             # Method 1

@@ -1,4 +1,5 @@
 from sqlite3 import TimeFromTicks
+import whylogs as why
 from whylogs.core import DatasetProfile, DatasetProfileView
 import pandas as pd
 from timeit import default_timer as timer
@@ -25,6 +26,16 @@ view = profile.view()
 end = timer()
 print(view.to_pandas())
 print(f'Took {end - start} seconds for from_rows df')
+
+
+
+new_df = pd.DataFrame.from_dict(rows)
+start = timer()
+for row in rows:
+    why.log(row)
+end = timer()
+print(view.to_pandas())
+print(f'Took {end - start} seconds for why.log')
 
 
 start = timer()
