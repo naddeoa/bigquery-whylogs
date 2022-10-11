@@ -225,6 +225,30 @@ def run(argv=None, save_main_session=True):
                 .with_output_types(Tuple[int, bytes])
             )
 
+        elif known_args.method == '1-crypto':
+            # 1 with a different dataset. Much larger crypto dataset grouped by month. About 500gb
+            # 4 hours for 1 tb: https://console.cloud.google.com/dataflow/jobs/us-east1/2022-10-11_07_53_34-10903259826440287531;step=ReadTable;graphView=0?project=whylogs-359820
+            # Pricing: https://cloud.google.com/dataflow/pricing (Dataflow compute resource pricing)
+            # $3.499216 for cpu
+            # $0.833479797 for memory
+            # $0.01287 shuffle
+            # $4.34 total
+            date_col = 'block_timestamp_month'
+            query = f'select * from bigquery-public-data.crypto_bitcoin_cash.transactions where {date_col} is not null'
+            hacker_news_data = (
+                p
+                | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                .with_output_types(Dict[str, Any])
+                | 'omit dateless' >> beam.Filter(lambda row: row[date_col] is not None)
+                .with_output_types(Dict[str, Any])
+                | 'Add keys' >> beam.Map(lambda row: (str(row[date_col]), row))
+                .with_output_types(Tuple[str,  Dict[str, Any]])
+                | 'Group into batches' >> beam.GroupIntoBatches(10_000, max_buffering_duration_secs=120)
+                .with_output_types(Tuple[str,  List[Dict[str, Any]]])
+                | 'Profile' >> beam.CombinePerKey(WhylogsCombineBulk())
+                .with_output_types(Tuple[str, bytes])
+            )
+
         elif known_args.method == '1-control':
             # Method 1-control
             # Same as 1 but it doesn't use whylogs. Takes about 20 minutes. We should be close to this.

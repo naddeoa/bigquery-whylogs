@@ -15,6 +15,9 @@ default:help
 1-control:METHOD=1-control
 1-control:run-container ## Same as 1 but it doesn't use whylogs at all.
 
+1-crypto:METHOD=1-crypto
+1-crypto:run-container ## Same as 1 but with a larger crypto dataset, grouping monthly.
+
 2:METHOD=2
 2:run-container ## Does profiling element-wise in a map step and reduces into views.
 
