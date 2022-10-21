@@ -5,7 +5,7 @@ BUCKET=gs://$(USER)_beam/$(JOB_NAME)
 TMP_BUCKET=$(BUCKET)/tmp
 REGION=us-west1 # us-west2, us-central1
 
-.PHONY: run 2 default
+.PHONY: run 2 default run-local run-container
 
 default:help
 
@@ -16,7 +16,7 @@ default:help
 1-control:run-container ## Same as 1 but it doesn't use whylogs at all.
 
 1-crypto:METHOD=1-crypto
-1-crypto:run-container ## Same as 1 but with a larger crypto dataset, grouping monthly.
+1-crypto:run-container ## Same as 1 but with a larger crypto dataset, grouping daily.
 
 2:METHOD=2
 2:run-container ## Does profiling element-wise in a map step and reduces into views.
@@ -36,6 +36,9 @@ window-1:run-container ## Run with daily windowing instead of creating day keys 
 window-batched:METHOD=window-batched
 window-batched:run-container ## Run with daily windowing instead of creating day keys manually
 
+less-shuffle:METHOD=less-shuffle
+less-shuffle:run-container
+
 run:
 	python ./test.py \
 	   --output $(BUCKET) \
@@ -47,6 +50,13 @@ run:
 	   --requirements_file=requirements.txt \
 	   --method $(METHOD)
 	   
+run-local:
+	python ./test.py \
+	   --output ./$(NAME)_output \
+	   --temp_location $(TMP_BUCKET) \
+	   --project whylogs-359820 \
+	   --requirements_file=requirements.txt \
+	   --method $(METHOD)
 
 run-container:
 	python ./test.py \
@@ -58,8 +68,10 @@ run-container:
 	   --region $(REGION) \
 	   --experiment=use_runner_v2 \
 	   --sdk_container_image=naddeoa/whylogs-dataflow-dependencies:no-analytics \
-	   --method $(METHOD)
+	   --method $(METHOD) 
+#    --worker_machine_type=m1-ultramem-40 --disk_size_gb=500
 
+# Machine types: https://cloud.google.com/compute/docs/memory-optimized-machines
 
 
 help: ## Show this help message.

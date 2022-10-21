@@ -4,8 +4,11 @@ from functools import reduce
 import logging
 import profile
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 from xmlrpc.client import DateTime
+
+import random
+from math import ceil
 
 import apache_beam as beam
 from apache_beam.io import ReadFromText
@@ -14,7 +17,8 @@ from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.options.pipeline_options import SetupOptions
 from apache_beam.io.gcp.internal.clients import bigquery
 
-from apache_beam.typehints import WindowedValue
+from apache_beam.typehints import WindowedValue, typehints
+from apache_beam.typehints.batch import BatchConverter, ListBatchConverter
 from apache_beam.transforms.combiners import Sample
 from apache_beam.transforms.trigger import AfterCount, DefaultTrigger, AfterAny, Repeatedly, AfterProcessingTime, AccumulationMode
 from apache_beam.transforms.window import TimestampedValue, WindowFn, FixedWindows, IntervalWindow
@@ -66,8 +70,6 @@ def run(argv=None, save_main_session=True):
                 return DatasetProfile().view()
 
             def add_input(self, accumulator: DatasetProfileView, input: List[Dict[str, Any]]) -> DatasetProfileView:
-                # start = timer()
-                # logger.info(f'Tracking {len(input)} of type {type(input)}.')
                 if len(input) == 0:
                     logger.warn('Got empty add_input')
                     return accumulator
@@ -75,33 +77,20 @@ def run(argv=None, save_main_session=True):
                 profile = DatasetProfile()
                 profile.track(pd.DataFrame.from_dict(input))
                 ret = accumulator.merge(profile.view())
-                # end = timer()
-                # total = end - start
-                # logger.info(
-                # f'add_input took {total} seconds with WHYLOGS_NO_ANALYTICS {os.environ["WHYLOGS_NO_ANALYTICS"]}')
                 return ret
 
             def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
-                # start = timer()
                 if len(accumulators) == 1:
                     # logger.info('Returning accumulator, only one to merge')
                     return accumulators[0]
 
-                # logger.info(f'Merging {len(accumulators)} views together')
                 view: DatasetProfileView = DatasetProfile().view()
                 for current_view in accumulators:
                     view = view.merge(current_view)
-                # end = timer()
-                # total = end - start
-                # logger.info(f'merge_accumulators took {total} seconds')
                 return view
 
             def extract_output(self, accumulator: DatasetProfileView) -> bytes:
-                # start = timer()
                 ser = accumulator.serialize()
-                # end = timer()
-                # total = end - start
-                # logger.info(f'extract_output took {total} seconds')
                 return ser
 
         class CombineBulkControl(beam.CombineFn):
@@ -129,7 +118,6 @@ def run(argv=None, save_main_session=True):
                 profile = DatasetProfile()
                 profile.track(input)
                 return accumulator.merge(profile.view())
-                # return 0
 
             def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
                 view: DatasetProfileView = DatasetProfile().view()
@@ -186,6 +174,9 @@ def run(argv=None, save_main_session=True):
             def extract_output(self, accumulator: DatasetProfileView) -> DatasetProfileView:
                 return accumulator.serialize()
 
+        def to_day_start_datetime(date: datetime) -> str:
+            return str(date.replace(second=0, microsecond=0, minute=0, hour=0).timestamp())
+
         def to_day_start(milli_time: int) -> datetime:
             date = datetime.fromtimestamp(milli_time)
             return date.replace(second=0, microsecond=0, minute=0, hour=0)
@@ -233,19 +224,26 @@ def run(argv=None, save_main_session=True):
             # $0.833479797 for memory
             # $0.01287 shuffle
             # $4.34 total
-            date_col = 'block_timestamp_month'
-            query = f'select * from bigquery-public-data.crypto_bitcoin_cash.transactions where {date_col} is not null'
+            date_col = 'block_timestamp'
+            query = f'select * from bigquery-public-data.crypto_bitcoin_cash.transactions where {date_col} is not null limit 10'
+
+            table_spec2 = bigquery.TableReference(
+                projectId='whylogs-359820',
+                datasetId='btc_cash',
+                tableId='transactions'
+            )
             hacker_news_data = (
                 p
-                | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                | 'ReadTable' >> beam.io.ReadFromBigQuery(table=table_spec2, use_standard_sql=True)
                 .with_output_types(Dict[str, Any])
                 | 'omit dateless' >> beam.Filter(lambda row: row[date_col] is not None)
                 .with_output_types(Dict[str, Any])
-                | 'Add keys' >> beam.Map(lambda row: (str(row[date_col]), row))
+                # | 'Add keys' >> beam.Map(lambda row: (str(row[date_col]), row)) # do monthly instead, set date_col='block_timestamp_month'
+                | 'Add keys' >> beam.Map(lambda row: (to_day_start_datetime(row[date_col]), row))
                 .with_output_types(Tuple[str,  Dict[str, Any]])
-                | 'Group into batches' >> beam.GroupIntoBatches(10_000, max_buffering_duration_secs=120)
+                | 'Group into batches' >> beam.GroupIntoBatches(10_000, max_buffering_duration_secs=60)
                 .with_output_types(Tuple[str,  List[Dict[str, Any]]])
-                | 'Profile' >> beam.CombinePerKey(WhylogsCombineBulk())
+                | 'Profile' >> beam.CombinePerKey(NoOpCombiner())
                 .with_output_types(Tuple[str, bytes])
             )
 
@@ -263,6 +261,85 @@ def run(argv=None, save_main_session=True):
                 .with_output_types(Tuple[int,  List[Dict[str, Any]]])
                 | 'Profile' >> beam.CombinePerKey(CombineBulkControl())
                 .with_output_types(Tuple[int, int])
+            )
+
+        elif known_args.method == 'less-shuffle':
+            window_size = timedelta(days=1).total_seconds()
+            table_spec = bigquery.TableReference(
+                projectId='whylogs-359820',
+                datasetId='hacker_news',
+                # tableId='comments'
+                tableId='short'
+                # tableId='comments_half'
+            )
+            query = 'select * from whylogs-359820.hacker_news.comments order by time'
+
+            class WhylogsProfileMerger(beam.CombineFn):
+
+                def create_accumulator(self) -> DatasetProfileView:
+                    return DatasetProfile().view()
+
+                def add_input(self, accumulator: DatasetProfileView, input: DatasetProfileView) -> DatasetProfileView:
+                    return accumulator.merge(input)
+
+                def add_inputs(self, mutable_accumulator: DatasetProfileView, elements: List[DatasetProfileView]) -> DatasetProfileView:
+                    view = mutable_accumulator
+                    for current_view in elements:
+                        view = view.merge(current_view)
+                    return view
+
+                def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
+                    if len(accumulators) == 1:
+                        # logger.info('Returning accumulator, only one to merge')
+                        return accumulators[0]
+
+                    view: DatasetProfileView = DatasetProfile().view()
+                    for current_view in accumulators:
+                        view = view.merge(current_view)
+                    return view
+
+                def extract_output(self, accumulator: DatasetProfileView) -> bytes:
+                    ser = accumulator.serialize()
+                    return ser
+
+            class DatasetProfileBatchConverter(ListBatchConverter):
+                def estimate_byte_size(self, batch):
+                    # TODO might be optional, according to the design doc
+                    nsampled = (
+                        ceil(len(batch) * self.SAMPLE_FRACTION)
+                        if len(batch) < self.SAMPLED_BATCH_SIZE else self.MAX_SAMPLES)
+                    mean_byte_size = sum(
+                        len(element.serialize())
+                        for element in random.sample(batch, nsampled)) / nsampled
+                    return ceil(mean_byte_size * len(batch))
+
+            BatchConverter.register(DatasetProfileBatchConverter)
+
+            class Profile(beam.DoFn):
+                # @beam.DoFn.yields_batches
+                # def process(self, element, timestamp=beam.DoFn.TimestampParam, window=beam.DoFn.WindowParam):
+                # pass
+
+                def process_batch(self, batch: List[Dict[str, Any]]) -> Iterator[List[DatasetProfileView]]:
+                    logger.info(f"===== Processing batch of size {len(batch)}")
+                    profile = DatasetProfile()
+                    profile.track(pd.DataFrame.from_dict(batch))
+                    yield [profile.view()]
+
+            hacker_news_data = (
+                p
+                | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                .with_output_types(Dict[str, Any])
+                # | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
+                # .with_output_types(Tuple[int,  Dict[str, Any]])
+
+
+                | 'Profile' >> beam.ParDo(Profile())
+                # .with_output_types(DatasetProfileView)
+                | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileMerger())
+
+                # | 'Profile' >> beam.CombinePerKey(WhylogsCombineBulk())
+                # .with_output_types(Tuple[int, bytes])
             )
 
         elif known_args.method == '2':
