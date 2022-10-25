@@ -5,6 +5,7 @@ import logging
 import profile
 import re
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from whylogs.core import DatasetProfile, DatasetProfileView
 from xmlrpc.client import DateTime
 
 import random
@@ -22,6 +23,54 @@ from apache_beam.typehints.batch import BatchConverter, ListBatchConverter
 from apache_beam.transforms.combiners import Sample
 from apache_beam.transforms.trigger import AfterCount, DefaultTrigger, AfterAny, Repeatedly, AfterProcessingTime, AccumulationMode
 from apache_beam.transforms.window import TimestampedValue, WindowFn, FixedWindows, IntervalWindow
+
+
+class ProfileIndex():
+
+    def __init__(self, index: Dict[str, DatasetProfileView] = {}) -> None:
+        self.index: Dict[str, DatasetProfileView] = index
+
+    def get(self, date_str: str) -> Optional[DatasetProfileView]:
+        return self.index[date_str]
+
+    def set(self, date_str: str, view: DatasetProfileView):
+        self.index[date_str] = view
+
+    # Mutates
+    def merge_index(self, other: 'ProfileIndex') -> 'ProfileIndex':
+        for date_str, view in other.index.items():
+            self.merge(date_str, view)
+
+        return self
+
+    def merge(self, date_str: str, view: DatasetProfileView):
+        if date_str in self.index:
+            self.index[date_str] = self.index[date_str].merge(view)
+        else:
+            self.index[date_str] = view
+
+    def estimate_size(self) -> int:
+        return sum(map(len, self.extract().values()))
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __iter__(self):
+        # The runtime wants to use this to estimate the size of the object,
+        # I suppose to load balance across workers.
+        return self.extract().values().__iter__()
+
+    def __getstate__(self):
+        return self.__dict__
+
+    def __setstate__(self, d):
+        self.__dict__ = d
+
+    def extract(self) -> Dict[str, bytes]:
+        out: Dict[str, bytes] = {}
+        for date_str, view in self.index.items():
+            out[date_str] = view.serialize()
+        return out
 
 
 def run(argv=None, save_main_session=True):
@@ -55,6 +104,7 @@ def run(argv=None, save_main_session=True):
         import os
         from io import StringIO
         from whylogs.core import DatasetProfile, DatasetProfileView
+        import whylogs as why
         from datetime import datetime
 
         # Apparently adds considerable overhead
@@ -264,6 +314,13 @@ def run(argv=None, save_main_session=True):
             )
 
         elif known_args.method == 'less-shuffle':
+            # SUCCESS
+            # 8gigs, 13min: https://console.cloud.google.com/dataflow/jobs/us-west1/2022-10-20_17_10_08-15859619108319017582;bottomTab=WORKER_LOGS;logsSeverity=INFO;graphView=0?project=whylogs-359820&pageState=(%22dfTime%22:(%22l%22:%22dfJobMaxTime%22))
+            # 1.2tb, 34min: https://console.cloud.google.com/dataflow/jobs/us-west1/2022-10-20_20_10_08-3351791207141559276;graphView=0?project=whylogs-359820
+            # By far hte fastest because it avoids massive shuffling by attempting to group the entire data set, but
+            # it depends on the data to be grouped up some other way (like ORDER BY) so that it doesn't end up
+            # generating mini 1-row profiles in the process_batch(). Call
+            # As-is, this is perfect for a daily batch job with only the current days data.
             window_size = timedelta(days=1).total_seconds()
             table_spec = bigquery.TableReference(
                 projectId='whylogs-359820',
@@ -273,6 +330,11 @@ def run(argv=None, save_main_session=True):
                 # tableId='comments_half'
             )
             query = 'select * from whylogs-359820.hacker_news.comments order by time'
+            crypto_table = bigquery.TableReference(
+                projectId='whylogs-359820',
+                datasetId='btc_cash',
+                tableId='transactions'
+            )
 
             class WhylogsProfileMerger(beam.CombineFn):
 
@@ -289,10 +351,6 @@ def run(argv=None, save_main_session=True):
                     return view
 
                 def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
-                    if len(accumulators) == 1:
-                        # logger.info('Returning accumulator, only one to merge')
-                        return accumulators[0]
-
                     view: DatasetProfileView = DatasetProfile().view()
                     for current_view in accumulators:
                         view = view.merge(current_view)
@@ -315,11 +373,7 @@ def run(argv=None, save_main_session=True):
 
             BatchConverter.register(DatasetProfileBatchConverter)
 
-            class Profile(beam.DoFn):
-                # @beam.DoFn.yields_batches
-                # def process(self, element, timestamp=beam.DoFn.TimestampParam, window=beam.DoFn.WindowParam):
-                # pass
-
+            class ProfileDoFn(beam.DoFn):
                 def process_batch(self, batch: List[Dict[str, Any]]) -> Iterator[List[DatasetProfileView]]:
                     logger.info(f"===== Processing batch of size {len(batch)}")
                     profile = DatasetProfile()
@@ -328,18 +382,100 @@ def run(argv=None, save_main_session=True):
 
             hacker_news_data = (
                 p
-                | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                | 'ReadTable' >> beam.io.ReadFromBigQuery(table=crypto_table,  use_standard_sql=True)
                 .with_output_types(Dict[str, Any])
                 # | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
                 # .with_output_types(Tuple[int,  Dict[str, Any]])
-
-
-                | 'Profile' >> beam.ParDo(Profile())
+                | 'Profile' >> beam.ParDo(ProfileDoFn())
                 # .with_output_types(DatasetProfileView)
                 | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileMerger())
 
                 # | 'Profile' >> beam.CombinePerKey(WhylogsCombineBulk())
                 # .with_output_types(Tuple[int, bytes])
+            )
+
+        elif known_args.method == 'less-shuffle-multiple-profiles':
+            window_size = timedelta(days=1).total_seconds()
+            table_spec = bigquery.TableReference(
+                projectId='whylogs-359820',
+                datasetId='hacker_news',
+                # tableId='comments'
+                tableId='short'
+                # tableId='comments_half'
+            )
+            query = 'select * from whylogs-359820.hacker_news.comments order by time'
+            # crypto_table= bigquery.TableReference(
+            #     projectId='whylogs-359820',
+            #     datasetId='btc_cash',
+            #     tableId='transactions'
+            # )
+
+            class WhylogsProfileMerger(beam.CombineFn):
+
+                def create_accumulator(self) -> ProfileIndex:
+                    return ProfileIndex()
+
+                def add_input(self, accumulator: ProfileIndex, input: ProfileIndex) -> ProfileIndex:
+                    return accumulator.merge_index(input)
+
+                def add_inputs(self, mutable_accumulator: ProfileIndex, elements: List[ProfileIndex]) -> ProfileIndex:
+                    index = mutable_accumulator
+                    for current_view in elements:
+                        index.merge_index(current_view)
+                    return index
+
+                def merge_accumulators(self, accumulators: List[ProfileIndex]) -> ProfileIndex:
+                    index = ProfileIndex()
+                    for current in accumulators:
+                        index.merge_index(current)
+                    return index
+
+                def extract_output(self, accumulator: ProfileIndex) -> Dict[str, bytes]:
+                    return accumulator.extract()
+
+            class DatasetProfileBatchConverter(ListBatchConverter):
+                def estimate_byte_size(self, batch):
+                    # TODO might be optional, according to the design doc
+                    # element here is going to be a ProfileIndex
+                    nsampled = (
+                        ceil(len(batch) * self.SAMPLE_FRACTION)
+                        if len(batch) < self.SAMPLED_BATCH_SIZE else self.MAX_SAMPLES)
+                    mean_byte_size = sum(
+                        element.estimate_size()
+                        for element in random.sample(batch, nsampled)) / nsampled
+                    return ceil(mean_byte_size * len(batch))
+
+            BatchConverter.register(DatasetProfileBatchConverter)
+
+            class ProfileDoFn(beam.DoFn):
+                def process_batch(self, batch: List[Dict[str, Any]]) -> Iterator[List[ProfileIndex]]:
+                    df = pd.DataFrame.from_dict(batch)
+                    df['datetime'] = pd.to_datetime(df["time"], unit='s')
+                    grouped = df.set_index('datetime').groupby(
+                        pd.Grouper(freq='D'))
+
+                    profiles = ProfileIndex()
+                    for date_group, dataframe in grouped:
+                        # pandas includes every date in the range, not just the ones that had rows...
+                        if len(dataframe) == 0:
+                            continue
+
+                        ts = date_group.to_pydatetime()
+                        profile = DatasetProfile(dataset_timestamp=ts)
+                        profile.track(dataframe)
+                        profiles.set(str(date_group),  profile.view())
+
+                    logger.info(
+                        f"Processing batch of size {len(batch)} into {len(profiles)} profiles")
+                    yield [profiles]
+
+            hacker_news_data = (
+                p
+                | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query,  use_standard_sql=True)
+                .with_output_types(Dict[str, Any])
+                | 'Profile' >> beam.ParDo(ProfileDoFn())
+                .with_output_types(List[ProfileIndex])
+                | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileMerger())
             )
 
         elif known_args.method == '2':
@@ -348,7 +484,7 @@ def run(argv=None, save_main_session=True):
             # Works the best so far. Took a little over an hour.
             # Works a little better than doing method 3 since we're just tracking single rows anyway, but neither of these are great: https://console.cloud.google.com/dataflow/jobs/us-west1/2022-10-07_12_06_50-6303582136449105573;graphView=0?project=whylogs-359820
             # 45 minutes for 4gigs: https://console.cloud.google.com/dataflow/jobs/us-west2/2022-10-08_18_01_52-3803300391562088720;step=;graphView=0?project=whylogs-359820
-            def add_keys_and_profile(row: Dict[str, Any]) -> Tuple[int, DatasetProfileView]:
+            def add_keys_and_profile(row: Dict[str, Any]) -> Tuple[Optional[int], DatasetProfileView]:
                 profile = DatasetProfile()
                 profile.track(row)
                 return (to_day_start_millis(row['time']), profile.view())

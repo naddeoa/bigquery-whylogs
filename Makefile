@@ -39,6 +39,9 @@ window-batched:run-container ## Run with daily windowing instead of creating day
 less-shuffle:METHOD=less-shuffle
 less-shuffle:run-container
 
+less-shuffle-multiple-profiles:METHOD=less-shuffle-multiple-profiles
+less-shuffle-multiple-profiles:run-container
+
 run:
 	python ./test.py \
 	   --output $(BUCKET) \
