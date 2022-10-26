@@ -36,6 +36,9 @@ class ProfileIndex():
     def set(self, date_str: str, view: DatasetProfileView):
         self.index[date_str] = view
 
+    def tuples(self) -> List[Tuple[str, DatasetProfileView]]:
+        return list(self.index.items())
+
     # Mutates
     def merge_index(self, other: 'ProfileIndex') -> 'ProfileIndex':
         for date_str, view in other.index.items():
@@ -197,31 +200,20 @@ def run(argv=None, save_main_session=True):
             def extract_output(self, accumulator: DatasetProfileView) -> DatasetProfileView:
                 return 1
 
-        class Foo(WindowFn):
-            def assign(self, assign_context):
-                pass
-
-            def merge(self, merge_context):
-                pass
-
-            def get_window_coder(self):
-                pass
-
         class CombineProfiledRows(beam.CombineFn):
             def create_accumulator(self) -> DatasetProfileView:
-                return DatasetProfile(dataset_timestamp=0).view()
+                return DatasetProfile().view()
 
             def add_input(self, accumulator: DatasetProfileView, input: DatasetProfileView) -> DatasetProfileView:
                 return accumulator.merge(input)
 
             def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
-                # logger.info(f'Merging {len(accumulators)} views together')
                 view: DatasetProfileView = DatasetProfile().view()
                 for current_view in accumulators:
                     view = view.merge(current_view)
                 return view
 
-            def extract_output(self, accumulator: DatasetProfileView) -> DatasetProfileView:
+            def extract_output(self, accumulator: DatasetProfileView) -> bytes:
                 return accumulator.serialize()
 
         def to_day_start_datetime(date: datetime) -> str:
@@ -410,45 +402,22 @@ def run(argv=None, save_main_session=True):
             #     tableId='transactions'
             # )
 
-            class WhylogsProfileMerger(beam.CombineFn):
-
-                def create_accumulator(self) -> ProfileIndex:
-                    return ProfileIndex()
-
-                def add_input(self, accumulator: ProfileIndex, input: ProfileIndex) -> ProfileIndex:
-                    return accumulator.merge_index(input)
-
-                def add_inputs(self, mutable_accumulator: ProfileIndex, elements: List[ProfileIndex]) -> ProfileIndex:
-                    index = mutable_accumulator
-                    for current_view in elements:
-                        index.merge_index(current_view)
-                    return index
-
-                def merge_accumulators(self, accumulators: List[ProfileIndex]) -> ProfileIndex:
-                    index = ProfileIndex()
-                    for current in accumulators:
-                        index.merge_index(current)
-                    return index
-
-                def extract_output(self, accumulator: ProfileIndex) -> Dict[str, bytes]:
-                    return accumulator.extract()
-
             class DatasetProfileBatchConverter(ListBatchConverter):
                 def estimate_byte_size(self, batch):
                     # TODO might be optional, according to the design doc
-                    # element here is going to be a ProfileIndex
+                    # element is a tuple of (date string, dataset view)
                     nsampled = (
                         ceil(len(batch) * self.SAMPLE_FRACTION)
                         if len(batch) < self.SAMPLED_BATCH_SIZE else self.MAX_SAMPLES)
                     mean_byte_size = sum(
-                        element.estimate_size()
+                        len(element[1].serialize())
                         for element in random.sample(batch, nsampled)) / nsampled
                     return ceil(mean_byte_size * len(batch))
 
             BatchConverter.register(DatasetProfileBatchConverter)
 
             class ProfileDoFn(beam.DoFn):
-                def process_batch(self, batch: List[Dict[str, Any]]) -> Iterator[List[ProfileIndex]]:
+                def process_batch(self, batch: List[Dict[str, Any]]) -> Iterator[List[Tuple[str, DatasetProfileView]]]:
                     df = pd.DataFrame.from_dict(batch)
                     df['datetime'] = pd.to_datetime(df["time"], unit='s')
                     grouped = df.set_index('datetime').groupby(
@@ -463,19 +432,19 @@ def run(argv=None, save_main_session=True):
                         ts = date_group.to_pydatetime()
                         profile = DatasetProfile(dataset_timestamp=ts)
                         profile.track(dataframe)
-                        profiles.set(str(date_group),  profile.view())
+                        profiles.set(str(date_group), profile.view())
 
                     logger.info(
                         f"Processing batch of size {len(batch)} into {len(profiles)} profiles")
-                    yield [profiles]
+                    yield profiles.tuples()
 
             hacker_news_data = (
                 p
                 | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query,  use_standard_sql=True)
                 .with_output_types(Dict[str, Any])
                 | 'Profile' >> beam.ParDo(ProfileDoFn())
-                .with_output_types(List[ProfileIndex])
-                | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileMerger())
+                .with_output_types(Tuple[str, DatasetProfileView])
+                | 'Merge profiles' >> beam.CombinePerKey(CombineProfiledRows())
             )
 
         elif known_args.method == '2':
