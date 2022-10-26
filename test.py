@@ -12,7 +12,6 @@ import random
 from math import ceil
 
 import apache_beam as beam
-from apache_beam.io import ReadFromText
 from apache_beam.io import WriteToText
 from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.options.pipeline_options import SetupOptions
@@ -387,6 +386,8 @@ def run(argv=None, save_main_session=True):
             )
 
         elif known_args.method == 'less-shuffle-multiple-profiles':
+            # 14min for 8gigs: https://console.cloud.google.com/dataflow/jobs/us-west1/2022-10-25_18_24_52-17167401703043896791;graphView=0?project=whylogs-359820
+            # But why are the number of profiles generated per batch monotonically increasing?: https://console.cloud.google.com/dataflow/jobs/us-west1/2022-10-25_21_10_02-2924671100848485891;bottomTab=WORKER_LOGS;logsSeverity=INFO;graphView=0?project=whylogs-359820&pageState=(%22dfTime%22:(%22l%22:%22dfJobMaxTime%22))
             window_size = timedelta(days=1).total_seconds()
             table_spec = bigquery.TableReference(
                 projectId='whylogs-359820',
@@ -396,11 +397,13 @@ def run(argv=None, save_main_session=True):
                 # tableId='comments_half'
             )
             query = 'select * from whylogs-359820.hacker_news.comments order by time'
-            # crypto_table= bigquery.TableReference(
-            #     projectId='whylogs-359820',
-            #     datasetId='btc_cash',
-            #     tableId='transactions'
-            # )
+            date_col = 'block_timestamp'
+            # crypto_query = f'select * from bigquery-public-data.crypto_bitcoin_cash.transactions where {date_col} is not null order by {date_col}'
+            crypto_table= bigquery.TableReference(
+                projectId='whylogs-359820',
+                datasetId='btc_cash',
+                tableId='transactions'
+            )
 
             class DatasetProfileBatchConverter(ListBatchConverter):
                 def estimate_byte_size(self, batch):
@@ -419,7 +422,7 @@ def run(argv=None, save_main_session=True):
             class ProfileDoFn(beam.DoFn):
                 def process_batch(self, batch: List[Dict[str, Any]]) -> Iterator[List[Tuple[str, DatasetProfileView]]]:
                     df = pd.DataFrame.from_dict(batch)
-                    df['datetime'] = pd.to_datetime(df["time"], unit='s')
+                    df['datetime'] = pd.to_datetime(df[date_col], unit='s')
                     grouped = df.set_index('datetime').groupby(
                         pd.Grouper(freq='D'))
 
@@ -440,7 +443,7 @@ def run(argv=None, save_main_session=True):
 
             hacker_news_data = (
                 p
-                | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query,  use_standard_sql=True)
+                | 'ReadTable' >> beam.io.ReadFromBigQuery(table=crypto_table,  use_standard_sql=True)
                 .with_output_types(Dict[str, Any])
                 | 'Profile' >> beam.ParDo(ProfileDoFn())
                 .with_output_types(Tuple[str, DatasetProfileView])

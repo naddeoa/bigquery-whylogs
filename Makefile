@@ -5,7 +5,7 @@ BUCKET=gs://$(USER)_beam/$(JOB_NAME)
 TMP_BUCKET=$(BUCKET)/tmp
 REGION=us-west1 # us-west2, us-central1
 
-.PHONY: run 2 default run-local run-container
+.PHONY: run 2 default run-local run-container template
 
 default:help
 
@@ -82,3 +82,14 @@ help: ## Show this help message.
 	@echo
 	@echo 'targets:'
 	@egrep '^(.+)\:(.+) ##\ (.+)' ${MAKEFILE_LIST} | sed -s 's/:\(.*\)##/: ##/' | column -t -c 2 -s ':#'
+
+
+
+template:
+	python -m ai.whylabs.profile_single_period \
+	  --runner DataflowRunner \
+	  --project whylogs-359820 \
+	  --staging_location gs://anthony_beam/staging \
+	  --temp_location gs://anthony_beam/temp \
+	  --template_location gs://anthony_beam/templates/profile_single_period \
+	  --region us-west1
