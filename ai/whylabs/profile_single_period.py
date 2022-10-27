@@ -13,25 +13,36 @@ from apache_beam.typehints.batch import BatchConverter, ListBatchConverter
 from apache_beam.options.value_provider import StaticValueProvider, RuntimeValueProvider
 
 
+class TemplateArguments(PipelineOptions):
+    @classmethod
+    def _add_argparse_args(cls, parser):
+        parser.add_value_provider_argument(
+            '--output',
+            dest='output',
+            help='Output file or gs:// path to write results to.')
+        parser.add_value_provider_argument(
+            '--input_table',
+            dest='input_table',
+            help='Fully qualified big query table to read from. Set this or input_query')
+        parser.add_value_provider_argument(
+            '--input_query',
+            dest='input_query',
+            help='BigQuery SQL query to use as input. Set this or input_table.')
+
+
 def run(argv=None, save_main_session=True):
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--output',
-        dest='output',
-        required=True,
-        default="gs://anthony_beam/template_test/",
-        help='Output file or gs:// path to write results to.')
-    parser.add_argument(
-        '--runtime-type-check',
-        dest='method',
-        default=True,
-        required=False)
-
-    known_args, pipeline_args = parser.parse_known_args(argv)
-
-    pipeline_options = PipelineOptions(pipeline_args)
+    pipeline_options = PipelineOptions()
+    template_arguments = pipeline_options.view_as(TemplateArguments)
     pipeline_options.view_as(
         SetupOptions).save_main_session = save_main_session
+
+    if template_arguments.input_table is not None:
+        input = {'table': template_arguments.input_table}
+    elif template_arguments.input_query is not None:
+        input = {'query': template_arguments.input_query,
+                 'use_standard_sql': True}
+    else:
+        raise "Must supply either input_table or input_query."
 
     with beam.Pipeline(options=pipeline_options) as p:
         import pandas as pd
@@ -101,13 +112,13 @@ def run(argv=None, save_main_session=True):
 
         result = (
             p
-            | 'ReadTable' >> beam.io.ReadFromBigQuery(table=crypto_table,  use_standard_sql=True)
+            | 'ReadTable' >> beam.io.ReadFromBigQuery(**input)
             .with_output_types(Dict[str, Any])
             | 'Profile' >> beam.ParDo(ProfileDoFn())
             | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileMerger())
         )
 
-        result | 'Write' >> WriteToText(known_args.output)
+        result | 'Write' >> WriteToText(template_arguments.output)
 
 
 if __name__ == '__main__':
