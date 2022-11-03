@@ -1,17 +1,19 @@
-import argparse
 import logging
+import re
 import random
 from math import ceil
 from typing import Any, Dict, Iterator, List
+from whylogs.core import DatasetProfile, DatasetProfileView
 
 import apache_beam as beam
 from apache_beam.io import WriteToText
-from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.options.pipeline_options import PipelineOptions, SetupOptions
 from apache_beam.typehints.batch import BatchConverter, ListBatchConverter
 
 from apache_beam.options.value_provider import StaticValueProvider, RuntimeValueProvider
 
+# matches PROJECT:DATASET.TABLE.
+table_ref_regex = re.compile(r'[^:\.]+:[^:\.]+\.[^:\.]+')
 
 class TemplateArguments(PipelineOptions):
     @classmethod
@@ -19,15 +21,26 @@ class TemplateArguments(PipelineOptions):
         parser.add_value_provider_argument(
             '--output',
             dest='output',
+            required=True,
             help='Output file or gs:// path to write results to.')
         parser.add_value_provider_argument(
-            '--input_table',
-            dest='input_table',
-            help='Fully qualified big query table to read from. Set this or input_query')
+            '--input',
+            required=True,
+            default='',
+            dest='input',
+            help='This can be a SQL query that includes a table name or a fully qualified reference to a table with the form PROJECT:DATASET.TABLE')
         parser.add_value_provider_argument(
-            '--input_query',
-            dest='input_query',
-            help='BigQuery SQL query to use as input. Set this or input_table.')
+            '--log_level',
+            dest='log_level',
+            default='INFO',
+            help='One of the logging levels from the logging module as a string.')
+
+def or_default(value: RuntimeValueProvider):
+    if value.is_accessible():
+        return value.get()
+    else:
+        return value.default_value
+
 
 
 def run(argv=None, save_main_session=True):
@@ -36,35 +49,25 @@ def run(argv=None, save_main_session=True):
     pipeline_options.view_as(
         SetupOptions).save_main_session = save_main_session
 
-    if template_arguments.input_table is not None:
-        input = {'table': template_arguments.input_table}
-    elif template_arguments.input_query is not None:
-        input = {'query': template_arguments.input_query,
-                 'use_standard_sql': True}
+    logging.getLogger().setLevel(logging.getLevelName(or_default(template_arguments.log_level)))
+    logger = logging.getLogger()
+
+    input = or_default(template_arguments.input)
+    if table_ref_regex.match(input):
+        pipeline_input = {'table': input}
     else:
-        raise "Must supply either input_table or input_query."
+        logger.info("Assuming input was a query becausee it didn't have the form PROJECT:DATASET.TABLE")
+        pipeline_input = {'query': input , 'use_standard_sql': True}
+
+    if template_arguments.output.is_accessible():
+        output = template_arguments.output.get()
+    else:
+        raise "Missing output argument"
 
     with beam.Pipeline(options=pipeline_options) as p:
         import pandas as pd
-        import whylogs as why
         from whylogs.core import DatasetProfile, DatasetProfileView
 
-        # Apparently adds considerable overhead
-        logger = logging.getLogger()
-
-        table_spec = bigquery.TableReference(
-            projectId='whylogs-359820',
-            datasetId='hacker_news',
-            # tableId='comments'
-            tableId='short'
-            # tableId='comments_half'
-        )
-        query = 'select * from whylogs-359820.hacker_news.comments order by time'
-        crypto_table = bigquery.TableReference(
-            projectId='whylogs-359820',
-            datasetId='btc_cash',
-            tableId='transactions'
-        )
 
         class WhylogsProfileMerger(beam.CombineFn):
 
@@ -76,23 +79,25 @@ def run(argv=None, save_main_session=True):
 
             def add_inputs(self, mutable_accumulator: DatasetProfileView, elements: List[DatasetProfileView]) -> DatasetProfileView:
                 view = mutable_accumulator
+                logger.debug("adding %s inputs", len(elements))
                 for current_view in elements:
                     view = view.merge(current_view)
                 return view
 
             def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
                 view: DatasetProfileView = DatasetProfile().view()
+                logger.debug("merging %s views", len(accumulators))
                 for current_view in accumulators:
                     view = view.merge(current_view)
                 return view
 
             def extract_output(self, accumulator: DatasetProfileView) -> bytes:
-                ser = accumulator.serialize()
-                return ser
+                return accumulator.serialize()
 
         class DatasetProfileBatchConverter(ListBatchConverter):
             def estimate_byte_size(self, batch):
                 # TODO might be optional, according to the design doc
+                # Was copied from the implementation of ListBatchConverter to make it work with profiles.
                 nsampled = (
                     ceil(len(batch) * self.SAMPLE_FRACTION)
                     if len(batch) < self.SAMPLED_BATCH_SIZE else self.MAX_SAMPLES)
@@ -105,22 +110,21 @@ def run(argv=None, save_main_session=True):
 
         class ProfileDoFn(beam.DoFn):
             def process_batch(self, batch: List[Dict[str, Any]]) -> Iterator[List[DatasetProfileView]]:
-                logger.debug(f"Processing batch of size {len(batch)}")
+                logger.debug("Processing batch of size %s", len(batch))
                 profile = DatasetProfile()
                 profile.track(pd.DataFrame.from_dict(batch))
                 yield [profile.view()]
 
         result = (
             p
-            | 'ReadTable' >> beam.io.ReadFromBigQuery(**input)
+            | 'ReadTable' >> beam.io.ReadFromBigQuery(**pipeline_input)
             .with_output_types(Dict[str, Any])
             | 'Profile' >> beam.ParDo(ProfileDoFn())
             | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileMerger())
         )
 
-        result | 'Write' >> WriteToText(template_arguments.output)
+        result | 'Write' >> WriteToText(output)
 
 
 if __name__ == '__main__':
-    logging.getLogger().setLevel(logging.INFO)
     run()

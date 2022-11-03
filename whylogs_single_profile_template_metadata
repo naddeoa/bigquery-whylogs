@@ -1,0 +1,28 @@
+{
+  "description": "Convert a data source into a single dataset profile",
+  "name": "whylogs single profile template",
+  "parameters": [
+    {
+      "regexes": [
+        "^gs:\\/\\/[^\\n\\r]+$"
+      ],
+      "name": "output",
+      "helpText": "This will be a file with a single serialized dataset profile.",
+      "label": "Output GCS path."
+    },
+    {
+      "name": "input",
+      "helpText": "This can be a SQL query that includes a table name in the FROM or just a fully qualified reference to a table with the form PROJECT:DATASET.TABLE.",
+      "label": "Input source"
+    },
+    {
+      "regexes": [
+        "^(INFO|WARN|ERROR|DEBUG)$"
+      ],
+      "name": "log_level",
+      "helpText": "One of the python logging levels. Defaults to 'INFO'",
+      "label": "Log level",
+      "isOptional": true
+    }
+  ]
+}

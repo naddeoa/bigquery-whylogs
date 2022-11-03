@@ -1,3 +1,4 @@
 {
-    "mypy.dmypyExecutable": "/home/anthony/workspace/glcoud-scratch/env/bin/dmypy"
+    "mypy.dmypyExecutable": "/home/anthony/workspace/bigquery-whylogs/.venv/bin/dmypy",
+    "git.ignoreLimitWarning": true
 }

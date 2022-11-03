@@ -1,8 +1,9 @@
 NAME=test
 METHOD=
 JOB_NAME=method-$(METHOD)--$(NAME)
-BUCKET=gs://$(USER)_beam/$(JOB_NAME)
-TMP_BUCKET=$(BUCKET)/tmp
+BUCKET=gs://$(USER)_beam
+BUCKET_DIR=$(BUCKET)/$(JOB_NAME)
+TMP_BUCKET_DIR=$(BUCKET)/tmp
 REGION=us-west1 # us-west2, us-central1
 
 .PHONY: run 2 default run-local run-container template
@@ -37,15 +38,35 @@ window-batched:METHOD=window-batched
 window-batched:run-container ## Run with daily windowing instead of creating day keys manually
 
 less-shuffle:METHOD=less-shuffle
-less-shuffle:run-container
+less-shuffle:run-container ## Fastest one. Avoids shuffles by turning the entire dataset into one profile.
 
 less-shuffle-multiple-profiles:METHOD=less-shuffle-multiple-profiles
-less-shuffle-multiple-profiles:run-container
+less-shuffle-multiple-profiles:run-container ## WIP, trying to make historical jobs reasonable
+
+
+TEMPLATE_LOCATION=$(BUCKET)/$(NAME)
+TEMPLATE_TMP_LOCATION=$(TEMPLATE_LOCATION)/tmp
+template: NAME=whylogs_single_profile_template
+template:template_matadata ## Upload new beam template for sharing
+	python -m ai.whylabs.profile_single_period \
+		--runner DataflowRunner \
+		--project whylogs-359820 \
+		--staging_location $(BUCKET)/$(NAME)/staging \
+		--temp_location $(TEMPLATE_TMP_LOCATION) \
+		--template_location $(TEMPLATE_LOCATION) \
+		--region us-west1 \
+		--requirements_file=requirements.txt \
+		--input whylogs-359820:hacker_news.comments_half \
+		--output gs://anthony_bucket/testing # This makes no sense. You should't have to provide this to generate a template.
+
+template_matadata: NAME=whylogs_single_profile_template
+template_matadata:
+	gsutil cp $(NAME)_metadata  $(BUCKET)/$(NAME)_metadata
 
 run:
 	python ./test.py \
-	   --output $(BUCKET) \
-	   --temp_location $(TMP_BUCKET) \
+	   --output $(BUCKET_DIR) \
+	   --temp_location $(TMP_BUCKET_DIR) \
 	   --job_name $(JOB_NAME) \
 	   --runner DataflowRunner \
 	   --project whylogs-359820 \
@@ -56,15 +77,15 @@ run:
 run-local:
 	python ./test.py \
 	   --output ./$(NAME)_output \
-	   --temp_location $(TMP_BUCKET) \
+	   --temp_location $(TMP_BUCKET_DIR) \
 	   --project whylogs-359820 \
 	   --requirements_file=requirements.txt \
 	   --method $(METHOD)
 
 run-container:
 	python ./test.py \
-	   --output $(BUCKET) \
-	   --temp_location $(TMP_BUCKET) \
+	   --output $(BUCKET_DIR) \
+	   --temp_location $(TMP_BUCKET_DIR) \
 	   --job_name $(JOB_NAME) \
 	   --runner DataflowRunner \
 	   --project whylogs-359820 \
@@ -81,15 +102,6 @@ help: ## Show this help message.
 	@echo 'usage: make [target] ...'
 	@echo
 	@echo 'targets:'
-	@egrep '^(.+)\:(.+) ##\ (.+)' ${MAKEFILE_LIST} | sed -s 's/:\(.*\)##/: ##/' | column -t -c 2 -s ':#'
+	@egrep '^(.+)\:(.*) ##\ (.+)' ${MAKEFILE_LIST} | sed -s 's/:\(.*\)##/: ##/' | column -t -c 2 -s ':#'
 
 
-
-template:
-	python -m ai.whylabs.profile_single_period \
-	  --runner DataflowRunner \
-	  --project whylogs-359820 \
-	  --staging_location gs://anthony_beam/staging \
-	  --temp_location gs://anthony_beam/temp \
-	  --template_location gs://anthony_beam/templates/profile_single_period \
-	  --region us-west1
