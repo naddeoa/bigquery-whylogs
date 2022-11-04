@@ -55,9 +55,7 @@ template:template_matadata ## Upload new beam template for sharing
 		--temp_location $(TEMPLATE_TMP_LOCATION) \
 		--template_location $(TEMPLATE_LOCATION) \
 		--region us-west1 \
-		--requirements_file=requirements.txt \
-		--input whylogs-359820:hacker_news.comments_half \
-		--output gs://anthony_bucket/testing # This makes no sense. You should't have to provide this to generate a template.
+		--requirements_file=requirements.txt
 
 template_matadata: NAME=whylogs_single_profile_template
 template_matadata:

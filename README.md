@@ -21,3 +21,10 @@ python ./test.py --output gs://anthony_beam/method-1--typecheck-test-should-fail
    --num_workers 10 \
    --method 1 # custom option from me to pick a pipeline to run
 ```
+
+
+# TODO
+- Use result sets instead of dataset profiles
+- Add a conditional stage to upload dataset profile to whylabs
+- Use a flex template instead so we can support full tables or queries
+- send PR to beam to allow setting both the table and the query

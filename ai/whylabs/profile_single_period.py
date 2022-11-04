@@ -10,7 +10,7 @@ from apache_beam.io import WriteToText
 from apache_beam.options.pipeline_options import PipelineOptions, SetupOptions
 from apache_beam.typehints.batch import BatchConverter, ListBatchConverter
 
-from apache_beam.options.value_provider import StaticValueProvider, RuntimeValueProvider
+from apache_beam.options.value_provider import RuntimeValueProvider, NestedValueProvider, StaticValueProvider
 
 # matches PROJECT:DATASET.TABLE.
 table_ref_regex = re.compile(r'[^:\.]+:[^:\.]+\.[^:\.]+')
@@ -21,19 +21,12 @@ class TemplateArguments(PipelineOptions):
         parser.add_value_provider_argument(
             '--output',
             dest='output',
-            required=True,
             help='Output file or gs:// path to write results to.')
         parser.add_value_provider_argument(
             '--input',
-            required=True,
-            default='',
             dest='input',
             help='This can be a SQL query that includes a table name or a fully qualified reference to a table with the form PROJECT:DATASET.TABLE')
-        parser.add_value_provider_argument(
-            '--log_level',
-            dest='log_level',
-            default='INFO',
-            help='One of the logging levels from the logging module as a string.')
+
 
 def or_default(value: RuntimeValueProvider):
     if value.is_accessible():
@@ -41,7 +34,14 @@ def or_default(value: RuntimeValueProvider):
     else:
         return value.default_value
 
+def is_table_input(table_string: str) -> bool:
+    return table_ref_regex.match(table_string) is not None
 
+def resolve_table_input(input: str):
+    return input if is_table_input(input) else None
+
+def resolve_query_input(input: str):
+    return None if is_table_input(input) else input 
 
 def run(argv=None, save_main_session=True):
     pipeline_options = PipelineOptions()
@@ -49,20 +49,11 @@ def run(argv=None, save_main_session=True):
     pipeline_options.view_as(
         SetupOptions).save_main_session = save_main_session
 
-    logging.getLogger().setLevel(logging.getLevelName(or_default(template_arguments.log_level)))
+    logging.getLogger().setLevel(logging.INFO)
     logger = logging.getLogger()
 
-    input = or_default(template_arguments.input)
-    if table_ref_regex.match(input):
-        pipeline_input = {'table': input}
-    else:
-        logger.info("Assuming input was a query becausee it didn't have the form PROJECT:DATASET.TABLE")
-        pipeline_input = {'query': input , 'use_standard_sql': True}
-
-    if template_arguments.output.is_accessible():
-        output = template_arguments.output.get()
-    else:
-        raise "Missing output argument"
+    table_input = NestedValueProvider(template_arguments.input, resolve_table_input)
+    query_input = NestedValueProvider(template_arguments.input, resolve_query_input)
 
     with beam.Pipeline(options=pipeline_options) as p:
         import pandas as pd
@@ -117,13 +108,13 @@ def run(argv=None, save_main_session=True):
 
         result = (
             p
-            | 'ReadTable' >> beam.io.ReadFromBigQuery(**pipeline_input)
+            | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query_input, use_standard_sql=True)
             .with_output_types(Dict[str, Any])
             | 'Profile' >> beam.ParDo(ProfileDoFn())
             | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileMerger())
         )
 
-        result | 'Write' >> WriteToText(output)
+        result | 'Write' >> WriteToText(template_arguments.output)
 
 
 if __name__ == '__main__':

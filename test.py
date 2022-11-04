@@ -317,8 +317,8 @@ def run(argv=None, save_main_session=True):
                 projectId='whylogs-359820',
                 datasetId='hacker_news',
                 # tableId='comments'
-                tableId='short'
-                # tableId='comments_half'
+                # tableId='short'
+                tableId='comments_half'
             )
             query = 'select * from whylogs-359820.hacker_news.comments order by time'
             crypto_table = bigquery.TableReference(
@@ -373,7 +373,7 @@ def run(argv=None, save_main_session=True):
 
             hacker_news_data = (
                 p
-                | 'ReadTable' >> beam.io.ReadFromBigQuery(table=crypto_table,  use_standard_sql=True)
+                | 'ReadTable' >> beam.io.ReadFromBigQuery(table=table_spec,  use_standard_sql=True)
                 .with_output_types(Dict[str, Any])
                 # | 'Add keys' >> beam.Map(lambda row: (to_day_start_millis(row['time']), row))
                 # .with_output_types(Tuple[int,  Dict[str, Any]])
