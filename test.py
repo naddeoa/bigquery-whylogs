@@ -396,9 +396,9 @@ def run(argv=None, save_main_session=True):
                 tableId='short'
                 # tableId='comments_half'
             )
-            query = 'select * from whylogs-359820.hacker_news.comments order by time'
+            query = 'select * from `whylogs-359820.hacker_news.comments` order by time'
             date_col = 'block_timestamp'
-            # crypto_query = f'select * from bigquery-public-data.crypto_bitcoin_cash.transactions where {date_col} is not null order by {date_col}'
+            # crypto_query = f'select * from `bigquery-public-data.crypto_bitcoin_cash.transactions` where block_timestamp is not null'
             crypto_table= bigquery.TableReference(
                 projectId='whylogs-359820',
                 datasetId='btc_cash',

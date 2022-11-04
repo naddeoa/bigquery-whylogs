@@ -70,16 +70,20 @@ def run(argv=None, save_main_session=True):
 
             def add_inputs(self, mutable_accumulator: DatasetProfileView, elements: List[DatasetProfileView]) -> DatasetProfileView:
                 view = mutable_accumulator
-                logger.debug("adding %s inputs", len(elements))
+                count = 0
                 for current_view in elements:
                     view = view.merge(current_view)
+                    count = count + 1
+                logger.debug("adding %s inputs", count)
                 return view
 
             def merge_accumulators(self, accumulators: List[DatasetProfileView]) -> DatasetProfileView:
                 view: DatasetProfileView = DatasetProfile().view()
-                logger.debug("merging %s views", len(accumulators))
+                count = 0
                 for current_view in accumulators:
                     view = view.merge(current_view)
+                    count = count + 1
+                logger.debug("merging %s views", count)
                 return view
 
             def extract_output(self, accumulator: DatasetProfileView) -> bytes:
