@@ -320,7 +320,7 @@ def run(argv=None, save_main_session=True):
                 # tableId='short'
                 tableId='comments_half'
             )
-            query = 'select * from whylogs-359820.hacker_news.comments order by time'
+            query = 'select * from `whylogs-359820.hacker_news.comments` order by time'
             crypto_table = bigquery.TableReference(
                 projectId='whylogs-359820',
                 datasetId='btc_cash',
@@ -421,7 +421,7 @@ def run(argv=None, save_main_session=True):
 
             class ProfileDoFn(beam.DoFn):
                 def process_batch(self, batch: List[Dict[str, Any]]) -> Iterator[List[Tuple[str, DatasetProfileView]]]:
-                    df = pd.DataFrame.from_dict(batch)
+                    df = pd.DataFrame.from_dict(batch, orient='index')
                     df['datetime'] = pd.to_datetime(df[date_col], unit='s')
                     grouped = df.set_index('datetime').groupby(
                         pd.Grouper(freq='D'))

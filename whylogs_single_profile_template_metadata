@@ -14,6 +14,26 @@
       "name": "input",
       "helpText": "This can be a SQL query that includes a table name in the FROM.",
       "label": "Input source"
+    },
+    {
+      "name": "date_column",
+      "helpText": "The string name of the column that contains a datetime. The column should be of type TIMESTAMP in the SQL schema.",
+      "label": "Date column"
+    },
+    {
+      "regexes": [
+        "^(INFO|DEBUG|WARN|ERROR)$"
+      ],
+      "name": "logging_level",
+      "helpText": "One of the logging levels from the logging module.",
+      "label": "Python logging level to use.",
+      "isOptional": true
+    },
+    {
+      "name": "date_grouping_frequency",
+      "helpText": "One of the freq options in the pandas Grouper(freq=) API. D for daily, W for weekly, etc.",
+      "label": "Pandas Grouper frequency.",
+      "isOptional": true 
     }
   ]
 }
