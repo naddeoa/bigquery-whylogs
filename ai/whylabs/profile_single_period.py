@@ -139,10 +139,6 @@ class UploadToWhylabsFn(beam.DoFn):
         self.logger = logging.getLogger("UploadToWhylabsFn")
 
     def setup(self):
-        # Just passing directly to the write method to avoid dealing with env
-        # os.environ["WHYLABS_DEFAULT_ORG_ID"] = "org-0"
-        # os.environ["WHYLABS_API_KEY"] = "YOUR-API-KEY"
-        # os.environ["WHYLABS_DEFAULT_DATASET_ID"] = "MODEL-ID"
         self.logger.setLevel(logging.getLevelName(self.args.logging_level.get()))
 
     def process_batch(self, batch: List[ProfileIndex]) -> Iterator[List[ProfileIndex]]:
@@ -272,8 +268,6 @@ def run(argv=None, save_main_session=True):
         template_arguments.input, resolve_query_input)
 
     with beam.Pipeline(options=pipeline_options) as p:
-        # import pandas as pd
-        # from whylogs.core import DatasetProfile, DatasetProfileView
 
         class ProfileIndexBatchConverter(ListBatchConverter):
             # TODO why do I get an error around this stuff while uploading the template now?
@@ -313,7 +307,9 @@ def run(argv=None, save_main_session=True):
          | 'Serialize Proflies' >> beam.ParDo(serialize_index)
             .with_input_types(ProfileIndex)
             .with_output_types(bytes)
-         | 'Upload to GCS' >> WriteToText(template_arguments.output, max_records_per_shard=1)
+         | 'Upload to GCS' >> WriteToText(template_arguments.output,
+                                          max_records_per_shard=1,
+                                          file_name_suffix=".bin")
          )
 
 
