@@ -22,10 +22,10 @@
     },
     {
       "regexes": [
-        "^(INFO|DEBUG|WARN|ERROR)$"
+        "^(INFO|DEBUG|WARN|WARNING|ERROR|FATAL|CRITICAL)$"
       ],
       "name": "logging_level",
-      "helpText": "One of the logging levels from the logging module.",
+      "helpText": "One of the logging levels from the logging module: DEBUG, INFO, WARN, ERROR, etc.",
       "label": "Python logging level to use.",
       "isOptional": true
     },
@@ -34,6 +34,21 @@
       "helpText": "One of the freq options in the pandas Grouper(freq=) API. D for daily, W for weekly, etc.",
       "label": "Pandas Grouper frequency.",
       "isOptional": true 
+    },
+    {
+      "name": "org_id",
+      "helpText": "The WhyLabs organization id to write the result profiles to.",
+      "label": "Organization ID"
+    },
+    {
+      "name": "dataset_id",
+      "helpText": "The WhyLabs model id id to write the result profiles to. Must be in the provided organization.",
+      "label": "Model ID"
+    },
+    {
+      "name": "api_key",
+      "helpText": "An api key for the organization. This can be generated from the Settings menu of your WhyLabs account.",
+      "label": "API Key"
     }
   ]
 }

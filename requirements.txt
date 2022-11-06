@@ -63,6 +63,7 @@ toml==0.10.2
 tomli==2.0.1
 typing_extensions==4.3.0
 urllib3==1.26.12
+whylabs-client==0.4.0.dev0
 whylogs==1.1.5
 whylogs-sketching==3.4.1.dev3
 zstandard==0.18.0

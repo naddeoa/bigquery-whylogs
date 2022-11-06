@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import logging
 import re
 import random
@@ -5,6 +6,8 @@ from math import ceil
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from whylogs.core import DatasetProfile, DatasetProfileView
 import pandas as pd
+import os
+import whylogs as why
 
 import apache_beam as beam
 from apache_beam.io import WriteToText
@@ -13,8 +16,19 @@ from apache_beam.typehints.batch import BatchConverter, ListBatchConverter
 
 from apache_beam.options.value_provider import RuntimeValueProvider, NestedValueProvider, StaticValueProvider
 
+
 # matches PROJECT:DATASET.TABLE.
 table_ref_regex = re.compile(r'[^:\.]+:[^:\.]+\.[^:\.]+')
+
+
+@dataclass
+class RuntimeValues():
+    org_id: RuntimeValueProvider
+    api_key: RuntimeValueProvider
+    dataset_id: RuntimeValueProvider
+    logging_level: RuntimeValueProvider
+    date_column: RuntimeValueProvider
+    date_grouping_frequency: RuntimeValueProvider
 
 
 class ProfileIndex():
@@ -65,6 +79,18 @@ class ProfileIndex():
     def __setstate__(self, d):
         self.__dict__ = d
 
+    def upload_to_whylabs(self, logger: logging.Logger, org_id: str, api_key: str, dataset_id: str):
+        # TODO uh oh, ResultSets only have DatasetProfiles, not DatasetProfileViews, I can't use them here
+        #   But then how does this work with spark? How are they writing their profiles there, or do they
+        #   just export them and write them externally? If they export the profiles, do they only do that
+        #   becaues they can't write it from the cluster if they wanted to?
+        from whylogs.api.writer.whylabs import WhyLabsWriter
+        writer = WhyLabsWriter(org_id=org_id, api_key=api_key, dataset_id=dataset_id)
+
+        for date_str, view in self.index.items():
+            logger.info("Writing dataset profile to %s:%s for timestamp %s", org_id, dataset_id, date_str)
+            writer.write(view)
+
     def extract(self) -> Dict[str, bytes]:
         out: Dict[str, bytes] = {}
         for date_str, view in self.index.items():
@@ -73,9 +99,9 @@ class ProfileIndex():
 
 
 class WhylogsProfileIndexMerger(beam.CombineFn):
-    def __init__(self, logging_level: RuntimeValueProvider):
+    def __init__(self, args: RuntimeValues):
         self.logger = logging.getLogger("WhylogsProfileIndexMerger")
-        self.logging_level = logging_level
+        self.logging_level = args.logging_level
 
     def setup(self):
         self.logger.setLevel(logging.getLevelName(self.logging_level.get()))
@@ -103,21 +129,41 @@ class WhylogsProfileIndexMerger(beam.CombineFn):
         self.logger.debug("merging %s views", count)
         return acc
 
-    def extract_output(self, accumulator: ProfileIndex) -> Dict[str, bytes]:
-        return accumulator.extract()
+    def extract_output(self, accumulator: ProfileIndex) -> ProfileIndex:
+        return accumulator
+
+
+class UploadToWhylabsFn(beam.DoFn):
+    def __init__(self, args: RuntimeValues):
+        self.args = args
+        self.logger = logging.getLogger("UploadToWhylabsFn")
+
+    def setup(self):
+        # Just passing directly to the write method to avoid dealing with env
+        # os.environ["WHYLABS_DEFAULT_ORG_ID"] = "org-0"
+        # os.environ["WHYLABS_API_KEY"] = "YOUR-API-KEY"
+        # os.environ["WHYLABS_DEFAULT_DATASET_ID"] = "MODEL-ID"
+        self.logger.setLevel(logging.getLevelName(self.args.logging_level.get()))
+
+    def process_batch(self, batch: List[ProfileIndex]) -> Iterator[List[ProfileIndex]]:
+        for index in batch:
+            index.upload_to_whylabs(self.logger,
+                                    self.args.org_id.get(),
+                                    self.args.api_key.get(),
+                                    self.args.dataset_id.get())
+        yield batch
 
 
 class ProfileDoFn(beam.DoFn):
-    def __init__(self, date_column: RuntimeValueProvider, date_grouping_frequency: RuntimeValueProvider, logging_level: RuntimeValueProvider):
-        self.date_column: RuntimeValueProvider = date_column
-        self.freq: RuntimeValueProvider = date_grouping_frequency
+    def __init__(self, args: RuntimeValues):
+        self.date_column: RuntimeValueProvider = args.date_column
+        self.freq: RuntimeValueProvider = args.date_grouping_frequency
+        self.logging_level = args.logging_level
         self.logger = logging.getLogger("ProfileDoFn")
-        self.logging_level = logging_level
 
     def setup(self):
         self.logger.setLevel(logging.getLevelName(self.logging_level.get()))
 
-    # TODO convert this so that people don't need to have a datetime explicitly listed
     def _process_batch_without_date(self, batch: List[Dict[str, Any]]) -> Iterator[List[DatasetProfileView]]:
         self.logger.debug("Processing batch of size %s", len(batch))
         profile = DatasetProfile()
@@ -178,6 +224,18 @@ class TemplateArguments(PipelineOptions):
             dest='logging_level',
             default='INFO',
             help='One of the logging levels from the logging module.')
+        parser.add_value_provider_argument(
+            '--org_id',
+            dest='org_id',
+            help='The WhyLabs organization id to write the result profiles to.')
+        parser.add_value_provider_argument(
+            '--dataset_id',
+            dest='dataset_id',
+            help='The WhyLabs model id id to write the result profiles to. Must be in the provided organization.')
+        parser.add_value_provider_argument(
+            '--api_key',
+            dest='api_key',
+            help='An api key for the organization. This can be generated from the Settings menu of your WhyLabs account.')
 
 
 def is_table_input(table_string: str) -> bool:
@@ -190,6 +248,16 @@ def resolve_table_input(input: str):
 
 def resolve_query_input(input: str):
     return None if is_table_input(input) else input
+
+
+def serialize_index(index: ProfileIndex) -> List[bytes]:
+    """
+    This function converts a single ProfileIndex into a collection of
+    serialized DatasetProfileViews so that they can subsequently be written
+    individually to GCS, rather than as a giant collection that has to be
+    parsed in a special way to get it back into a DatasetProfileView.
+    """
+    return list(index.extract().values())
 
 
 def run(argv=None, save_main_session=True):
@@ -217,20 +285,36 @@ def run(argv=None, save_main_session=True):
 
         BatchConverter.register(ProfileIndexBatchConverter)
 
-        logging_level = template_arguments.logging_level
-        date_column = template_arguments.date_column
-        date_grouping_frequency = template_arguments.date_grouping_frequency
+        args = RuntimeValues(
+            api_key=template_arguments.api_key,
+            dataset_id=template_arguments.dataset_id,
+            org_id=template_arguments.org_id,
+            logging_level=template_arguments.logging_level,
+            date_column=template_arguments.date_column,
+            date_grouping_frequency=template_arguments.date_grouping_frequency)
+
+        # The main pipeline
         result = (
             p
             | 'ReadTable' >> beam.io.ReadFromBigQuery(query=query_input, use_standard_sql=True)
             .with_output_types(Dict[str, Any])
-            | 'Profile' >> beam.ParDo(ProfileDoFn(date_column, date_grouping_frequency, logging_level))
-            | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileIndexMerger(logging_level))
+            | 'Profile' >> beam.ParDo(ProfileDoFn(args))
+            | 'Merge profiles' >> beam.CombineGlobally(WhylogsProfileIndexMerger(args))
+            .with_output_types(ProfileIndex)
         )
 
-        result | 'Upload to WhyLabs' >> beam.ParDo(lambda x: x)
+        # A fork that uploads to WhyLabs
+        result | 'Upload to WhyLabs' >> (beam.ParDo(UploadToWhylabsFn(args))
+                                         .with_input_types(ProfileIndex)
+                                         .with_output_types(ProfileIndex))
 
-        result | 'Write' >> WriteToText(template_arguments.output)
+        # A fork that uploads to GCS, each dataset profile in serialized form, one per file.
+        (result
+         | 'Serialize Proflies' >> beam.ParDo(serialize_index)
+            .with_input_types(ProfileIndex)
+            .with_output_types(bytes)
+         | 'Upload to GCS' >> WriteToText(template_arguments.output, max_records_per_shard=1)
+         )
 
 
 if __name__ == '__main__':

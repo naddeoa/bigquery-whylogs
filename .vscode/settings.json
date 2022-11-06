@@ -1,4 +1,7 @@
 {
     "mypy.dmypyExecutable": "/home/anthony/workspace/bigquery-whylogs/.venv/bin/dmypy",
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "python.formatting.autopep8Args": [
+        "--max-line-length=120"
+    ]
 }
