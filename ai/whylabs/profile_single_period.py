@@ -256,28 +256,27 @@ def serialize_index(index: ProfileIndex) -> List[bytes]:
     return list(index.extract().values())
 
 
+class ProfileIndexBatchConverter(ListBatchConverter):
+    # TODO why do I get an error around this stuff while uploading the template now?
+    def estimate_byte_size(self, batch: List[ProfileIndex]):
+        if len(batch) == 0:
+            return 0
+
+        return batch[0].estimate_size()
+
+
+BatchConverter.register(ProfileIndexBatchConverter)
+
+
 def run(argv=None, save_main_session=True):
     pipeline_options = PipelineOptions()
     template_arguments = pipeline_options.view_as(TemplateArguments)
     pipeline_options.view_as(
         SetupOptions).save_main_session = save_main_session
 
-    table_input = NestedValueProvider(
-        template_arguments.input, resolve_table_input)
-    query_input = NestedValueProvider(
-        template_arguments.input, resolve_query_input)
+    query_input = NestedValueProvider(template_arguments.input, resolve_query_input)
 
     with beam.Pipeline(options=pipeline_options) as p:
-
-        class ProfileIndexBatchConverter(ListBatchConverter):
-            # TODO why do I get an error around this stuff while uploading the template now?
-            def estimate_byte_size(self, batch: List[ProfileIndex]):
-                if len(batch) == 0:
-                    return 0
-
-                return batch[0].estimate_size()
-
-        BatchConverter.register(ProfileIndexBatchConverter)
 
         args = RuntimeValues(
             api_key=template_arguments.api_key,

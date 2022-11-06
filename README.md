@@ -24,7 +24,7 @@ python ./test.py --output gs://anthony_beam/method-1--typecheck-test-should-fail
 
 
 # TODO
+- Setup dedicated package and infra that uploads to GCS bucket
 - Use result sets instead of dataset profiles
-- Add a conditional stage to upload dataset profile to whylabs
-- Use a flex template instead so we can support full tables or queries
-- send PR to beam to allow setting both the table and the query
+- Use a flex template instead so we can support full tables and queries
+
